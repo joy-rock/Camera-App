@@ -49,22 +49,6 @@
 2. **Scan QR code** displayed in terminal/browser
 3. **Grant camera permissions** when prompted
 
-## 📋 App Structure
-
-```
-├── App.tsx                 # Main application component
-├── app.json               # Expo configuration
-├── package.json           # Dependencies and scripts
-├── babel.config.js        # Babel configuration for Expo
-├── metro.config.js        # Metro bundler configuration
-├── index.js              # App entry point
-└── assets/               # App icons and splash screens
-    ├── icon.png
-    ├── adaptive-icon.png
-    ├── splash.png
-    └── favicon.png
-```
-
 ## 🎯 Key Components
 
 ### 1. Login Screen
@@ -92,46 +76,3 @@ The app uses `expo-camera` (SDK 53) with the following features:
 - **Cross-Platform**: Works on iOS, Android, and Web
 - **Error Handling**: Graceful error handling for camera failures
 - **New Architecture**: Compatible with React Native's New Architecture (enabled by default in SDK 53)
-
-
-### Adding Real AI Classification
-
-Replace the simulated classification in `CameraAIScreen`:
-
-```typescript
-// Replace this simulation:
-setTimeout(() => {
-  setIsClassifying(false);
-  setResult('Bulk Items (Furniture, appliances)');
-}, 5000);
-
-// With actual AI service call:
-const classifyImage = async (imageUri: string) => {
-  try {
-    const response = await fetch('YOUR_AI_ENDPOINT', {
-      method: 'POST',
-      body: formData,
-    });
-    const result = await response.json();
-    setResult(result.classification);
-  } catch (error) {
-    console.error('Classification error:', error);
-  }
-};
-```
-
-### Updating App Icons
-
-Replace placeholder files in `assets/` with actual images:
-
-- `icon.png`: 1024x1024px app icon
-- `adaptive-icon.png`: 1024x1024px Android adaptive icon
-- `splash.png`: Splash screen image
-- `favicon.png`: 48x48px web favicon
-
-
-npm start          # Start development server
-npm run web        # Run on web browser
-npm run ios        # Run on iOS simulator
-npm run android    # Run on Android emulator
-```
