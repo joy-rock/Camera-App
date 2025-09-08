@@ -1,15 +1,56 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StatusBar, StyleSheet, useColorScheme, View, Text, TouchableOpacity, Image, PermissionsAndroid, Platform, TextInput, ActivityIndicator, ScrollView, Animated, Dimensions } from 'react-native';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Camera, useCameraDevices } from 'react-native-vision-camera';
+import { StatusBar, StyleSheet, useColorScheme, View, Text, TouchableOpacity, Image, Platform, TextInput, ActivityIndicator, ScrollView, Dimensions, Alert, Pressable, RefreshControl } from 'react-native';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import * as MediaLibrary from 'expo-media-library';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator, StackNavigationProp } from '@react-navigation/stack';
 import type { RouteProp } from '@react-navigation/native';
+import './utils/webPolyfills';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withTiming,
+  interpolate,
+  Extrapolate,
+  FadeIn,
+  FadeOut,
+  SlideInRight,
+  SlideOutLeft,
+  ZoomIn,
+  withSequence,
+  withDelay,
+  runOnJS,
+  Easing,
+  FadeInDown,
+  FadeInUp,
+} from 'react-native-reanimated';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
+import { Colors, Spacing, BorderRadius, Shadows, Typography, Animations } from './constants/theme';
+import { 
+  AnimatedButton, 
+  AnimatedCard, 
+  FadeInView, 
+  ScaleInView, 
+  GlassmorphicCard,
+  AnimatedIcon,
+  SkeletonLoader,
+  AnimatedText,
+  AnimatedView,
+  AnimatedImage,
+  AnimatedScrollView
+} from './components/AnimatedComponents';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { StorageService, CapturedItem } from './utils/storage';
+import { LocationService } from './utils/location';
 
 type RootStackParamList = {
   Login: undefined;
   Home: undefined;
   CameraAI: undefined;
+  ItemsList: undefined;
 };
 const Stack = createStackNavigator<RootStackParamList>();
 
@@ -22,7 +63,6 @@ type User = {
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 export default function App() {
-  const isDarkMode = useColorScheme() === 'dark';
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [user, setUser] = useState<User | null>(null);
 
@@ -38,9 +78,15 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+      <StatusBar barStyle="light-content" backgroundColor={Colors.dark} />
       <NavigationContainer>
-        <Stack.Navigator screenOptions={{ headerShown: false }}>
+        <Stack.Navigator 
+          screenOptions={{ 
+            headerShown: false,
+            // animation: 'slide_from_right',
+            presentation: 'card',
+          }}
+        >
           {!isAuthenticated ? (
             <Stack.Screen name="Login">
               {() => <LoginScreen onLogin={handleLogin} />}
@@ -49,10 +95,19 @@ export default function App() {
             <>
               <Stack.Screen name="Home">
                 {({ navigation }: { navigation: StackNavigationProp<RootStackParamList, 'Home'> }) => (
-                  <AppContent user={user} navigation={navigation} />
+                  <AppContent user={user} navigation={navigation} setIsAuthenticated={setIsAuthenticated} setUser={setUser} />
                 )}
               </Stack.Screen>
-              <Stack.Screen name="CameraAI" component={CameraAIScreen} />
+              <Stack.Screen name="CameraAI">
+                {({ navigation }: { navigation: StackNavigationProp<RootStackParamList, 'CameraAI'> }) => (
+                  <CameraAIScreen navigation={navigation} user={user} setIsAuthenticated={setIsAuthenticated} setUser={setUser} />
+                )}
+              </Stack.Screen>
+              <Stack.Screen name="ItemsList">
+                {({ navigation }: { navigation: StackNavigationProp<RootStackParamList, 'ItemsList'> }) => (
+                  <ItemsListScreen navigation={navigation} user={user} setIsAuthenticated={setIsAuthenticated} setUser={setUser} />
+                )}
+              </Stack.Screen>
             </>
           )}
         </Stack.Navigator>
@@ -64,306 +119,666 @@ export default function App() {
 type AppContentProps = {
   user: User | null;
   navigation: StackNavigationProp<RootStackParamList, 'Home'>;
+  setIsAuthenticated: (value: boolean) => void;
+  setUser: (value: User | null) => void;
 };
-function AppContent({ user, navigation }: AppContentProps) {
-  const [hasPermission, setHasPermission] = useState(false);
-  const [permissionRequested, setPermissionRequested] = useState(false);
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
-  const [showCamera, setShowCamera] = useState(false);
-  const camera = useRef<any>(null);
-  const devices = useCameraDevices();
-  const device = Array.isArray(devices)
-    ? devices.find((d) => d.position === 'back') || devices[0]
-    : undefined;
 
-  // Request camera permission on mount
-  useEffect(() => {
-    async function requestCameraPermission() {
-      let granted = false;
-      if (Platform.OS === 'android') {
-        try {
-          const result = await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.CAMERA,
-            {
-              title: 'Camera Permission',
-              message: 'This app needs access to your camera to take photos.',
-              buttonPositive: 'OK',
-            }
-          );
-          granted = result === PermissionsAndroid.RESULTS.GRANTED;
-        } catch (e) {
-          granted = false;
-        }
-      } else {
-        // iOS: use react-native-vision-camera API
-        try {
-          // @ts-ignore
-          const status = await Camera.requestCameraPermission();
-          granted = status === 'authorized';
-        } catch (e) {
-          granted = false;
-        }
-      }
-      setHasPermission(granted);
-      setPermissionRequested(true);
-    }
-    requestCameraPermission();
-  }, []);
+function AppContent({ user, navigation, setIsAuthenticated, setUser }: AppContentProps) {
+  const scrollY = useSharedValue(0);
+  const headerScale = useSharedValue(1);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number; address?: string } | null>(null);
+  const [locationLoading, setLocationLoading] = useState(false);
 
-  const takePhoto = async () => {
-    if (camera.current == null) return;
-    // @ts-ignore
-    const photo = await camera.current.takePhoto({ flash: 'off' });
-    setPhotoUri('file://' + photo.path);
-    setShowCamera(false);
+  const handleScroll = (event: any) => {
+    'worklet';
+    const offsetY = event.nativeEvent.contentOffset.y;
+    scrollY.value = offsetY;
+    headerScale.value = interpolate(offsetY, [0, 100], [1, 0.9], Extrapolate.CLAMP);
   };
 
-  if (!showCamera) {
+  const headerAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: headerScale.value }],
+    opacity: interpolate(scrollY.value, [0, 100], [1, 0.8], Extrapolate.CLAMP),
+  }));
+
+  const updateLocation = async () => {
+    setLocationLoading(true);
+    try {
+      const location = await LocationService.getCurrentLocation();
+      if (location) {
+        setUserLocation(location);
+        Alert.alert('Success', 'Location updated successfully');
+      } else {
+        Alert.alert('Error', 'Could not get location. Please ensure location permissions are enabled.');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to get location');
+      console.error('Location error:', error);
+    } finally {
+      setLocationLoading(false);
+    }
+  };
+
     return (
-      <View style={{ flex: 1, backgroundColor: '#f5f7fa' }}>
-        <AppHeader user={user} onBack={() => navigation.goBack()} onSignOut={() => { setIsAuthenticated(false); setUser(null); }} />
-        <View style={{ width: '100%', alignItems: 'flex-start', paddingLeft: 28, marginTop: 10, marginBottom: 8 }}>
-          <Text style={{ color: '#64748b', fontSize: 15, fontWeight: '600', letterSpacing: 0.5 }}>
-            Home
-          </Text>
+    <LinearGradient
+      colors={[Colors.dark, Colors.darkSecondary]}
+      style={{ flex: 1 }}
+    >
+      <SafeAreaView style={{ flex: 1 }}>
+        <View>
+          <AnimatedView style={[headerAnimatedStyle]}>
+            <AppHeader 
+              user={user} 
+              onBack={() => navigation.goBack()} 
+              onSignOut={() => { setIsAuthenticated(false); setUser(null); }} 
+            />
+          </AnimatedView>
         </View>
-        <ScrollView
+        
+        <AnimatedScrollView
+          onScroll={handleScroll}
+          scrollEventThrottle={16}
           style={{ flex: 1 }}
           contentContainerStyle={{
-            flexGrow: 1,
-            paddingVertical: 24,
-            paddingHorizontal: 0,
-            alignItems: 'center',
-            justifyContent: 'flex-start',
-            minHeight: '100%',
+            paddingTop: Spacing.md,
+            paddingBottom: Spacing.xxl,
+            paddingHorizontal: Spacing.lg,
           }}
           showsVerticalScrollIndicator={false}
         >
-          <View style={[styles.header, { maxWidth: 420, width: '95%' }]}> 
-            <View style={styles.profileIcon}>
-              <Text style={{ fontSize: 32 }}>🧑‍🚚</Text>
+          {/* Welcome Section */}
+          <FadeInView delay={200}>
+            <View style={homeStyles.welcomeSection}>
+              <AnimatedText 
+                style={homeStyles.welcomeText}
+                entering={FadeInDown.delay(300).springify()}
+              >
+                Welcome back,
+              </AnimatedText>
+              <AnimatedText 
+                style={homeStyles.userName}
+                entering={FadeInDown.delay(400).springify()}
+              >
+                {user?.name || 'Driver'} 👋
+              </AnimatedText>
             </View>
-            <View style={styles.userInfo}>
-              <Text style={[styles.userName, { maxWidth: 200 }]} numberOfLines={1} ellipsizeMode="tail">Hi, {user?.name || 'Driver'} 👋</Text>
-              <Text style={[styles.userLicense, { maxWidth: 200 }]} numberOfLines={1} ellipsizeMode="tail">License: {user?.license || 'ABC123456'}</Text>
-            </View>
-          </View>
-          <View style={[styles.locationCard, { maxWidth: 420, width: '95%' }]}> 
-            <View style={styles.locationIconContainer}>
-              <Text style={styles.locationIcon}>📍</Text>
-              <Text style={styles.locationLabel}>Current Location</Text>
-            </View>
-            <View style={styles.locationTextContainer}>
-              <Text style={[styles.locationText, { maxWidth: 220 }]} numberOfLines={1} ellipsizeMode="tail">123 Main Street, City, Country</Text>
-            </View>
-          </View>
-          <View style={[styles.captureCard, { maxWidth: 420, width: '95%' }]}> 
-            <View style={styles.cameraIconContainer}>
-              <Text style={styles.cameraIcon}>🤖</Text>
-            </View>
-            <Text style={[styles.captureTitle, { textAlign: 'center', maxWidth: 260, alignSelf: 'center' }]}>Camera & AI Classification</Text>
-            <TouchableOpacity
-              style={styles.takePhotoButton}
-              activeOpacity={0.8}
-              onPress={() => navigation.navigate('CameraAI')}
-            >
-              <Text style={styles.takePhotoButtonText}>Open Camera & AI</Text>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      </View>
-    );
-  }
+          </FadeInView>
 
-  if (!device) {
-    return (
-      <View style={styles.centered}>
-        <Text>Loading camera...</Text>
+          {/* Stats Cards */}
+          <View style={homeStyles.statsContainer}>
+            <AnimatedCard delay={500} variant="glass" style={homeStyles.statCard}>
+              <View style={homeStyles.statIconContainer}>
+                <Text style={homeStyles.statIcon}>📦</Text>
+            </View>
+              <Text style={homeStyles.statNumber}>24</Text>
+              <Text style={homeStyles.statLabel}>Deliveries Today</Text>
+            </AnimatedCard>
+
+            <AnimatedCard delay={600} variant="glass" style={homeStyles.statCard}>
+              <View style={homeStyles.statIconContainer}>
+                <Text style={homeStyles.statIcon}>🎯</Text>
+          </View>
+              <Text style={homeStyles.statNumber}>98%</Text>
+              <Text style={homeStyles.statLabel}>Success Rate</Text>
+            </AnimatedCard>
+            </View>
+
+          {/* Location Card */}
+          <AnimatedCard delay={700} variant="gradient" style={homeStyles.locationCard}>
+            <LinearGradient
+              colors={[Colors.primary + '20', Colors.primaryDark + '10']}
+              style={homeStyles.gradientOverlay}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+            />
+            <View style={homeStyles.locationHeader}>
+              <View style={homeStyles.locationIconWrapper}>
+                <Text style={homeStyles.locationIcon}>📍</Text>
+            </View>
+              <View style={{ flex: 1 }}>
+                <Text style={homeStyles.locationTitle}>Current Location</Text>
+                {locationLoading ? (
+                  <ActivityIndicator size="small" color={Colors.primary} style={{ marginTop: 4 }} />
+                ) : (
+                  <Text style={homeStyles.locationText}>
+                    {userLocation ? LocationService.formatLocation(userLocation) : 'Tap to set location'}
+                  </Text>
+                )}
+          </View>
+            </View>
+            <AnimatedButton
+              onPress={updateLocation}
+              variant="glass"
+              size="small"
+              style={{ marginTop: Spacing.md }}
+              disabled={locationLoading}
+            >
+              <Text style={{ color: Colors.primary }}>
+                {locationLoading ? 'Getting Location...' : 'Update Location'}
+              </Text>
+            </AnimatedButton>
+          </AnimatedCard>
+
+          {/* Main Action Card */}
+          <AnimatedCard delay={800} variant="solid" style={homeStyles.mainActionCard}>
+            <LinearGradient
+              colors={[Colors.primary, Colors.primaryDark]}
+              style={homeStyles.gradientBackground}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+            />
+            <ScaleInView delay={900}>
+              <View style={homeStyles.actionIconContainer}>
+                <Text style={homeStyles.actionIcon}>📸</Text>
+              </View>
+            </ScaleInView>
+            <Text style={homeStyles.actionTitle}>Furniture Detection AI</Text>
+            <Text style={homeStyles.actionDescription}>
+              Use advanced AI to identify and classify furniture items instantly
+            </Text>
+            <View style={{ flexDirection: 'row', gap: Spacing.md, marginTop: Spacing.lg, width: '100%' }}>
+              <AnimatedButton
+              onPress={() => navigation.navigate('CameraAI')}
+                variant="glass"
+                size="large"
+                style={{ flex: 1 }}
+            >
+                <View style={homeStyles.buttonContent}>
+                  <Text style={homeStyles.buttonIcon}>🤖</Text>
+                  <Text style={homeStyles.actionButtonText}>Start Scanning</Text>
+          </View>
+              </AnimatedButton>
+              <AnimatedButton
+                onPress={() => navigation.navigate('ItemsList')}
+                variant="glass"
+                size="medium"
+                style={{ paddingHorizontal: Spacing.lg }}
+              >
+                <Ionicons name="list" size={24} color={Colors.gray[50]} />
+              </AnimatedButton>
       </View>
-    );
-  }
-  if (!hasPermission && permissionRequested) {
-    return (
-      <View style={styles.centered}>
-        <Text>No camera permission. Please enable camera access in your device settings.</Text>
+          </AnimatedCard>
+
+          {/* Quick Actions */}
+          <FadeInView delay={900}>
+            <Text style={homeStyles.sectionTitle}>Quick Actions</Text>
+          </FadeInView>
+          
+          <View style={homeStyles.quickActionsContainer}>
+            {[
+              { icon: '📋', title: 'History', color: Colors.secondary },
+              { icon: '⚙️', title: 'Settings', color: Colors.accent },
+              { icon: '📊', title: 'Reports', color: Colors.warning },
+              { icon: '❓', title: 'Help', color: Colors.info },
+            ].map((action, index) => (
+              <AnimatedCard
+                key={action.title}
+                delay={1000 + index * 100}
+                variant="glass"
+                style={homeStyles.quickActionCard}
+              >
+                <TouchableOpacity style={homeStyles.quickActionContent}>
+                  <View style={[homeStyles.quickActionIcon, { backgroundColor: action.color + '20' }]}>
+                    <Text style={{ fontSize: 24 }}>{action.icon}</Text>
       </View>
-    );
-  }
-  if (!hasPermission && !permissionRequested) {
-    return (
-      <View style={styles.centered}>
-        <Text>Requesting camera permission...</Text>
-      </View>
-    );
-  }
-  return (
-    <View style={styles.container}>
-      {photoUri ? (
-        <View style={[styles.previewContainer, { flex: 1, justifyContent: 'center', alignItems: 'center' }]}> 
-          <Image
-            source={{ uri: photoUri || undefined }}
-            style={{ width: '100%', height: '100%', flex: 1, resizeMode: 'contain', borderRadius: 18, borderWidth: 2, borderColor: '#2196F3', backgroundColor: '#222', alignSelf: 'center' }}
-          />
-          <TouchableOpacity style={styles.button} onPress={() => setPhotoUri(null)}>
-            <Text style={styles.buttonText}>Take Another</Text>
+                  <Text style={homeStyles.quickActionText}>{action.title}</Text>
           </TouchableOpacity>
+              </AnimatedCard>
+            ))}
         </View>
-      ) : (
-        <>
-          <Camera
-            ref={camera}
-            style={styles.camera}
-            device={device}
-            isActive={true}
-            photo={true}
-          />
-          <TouchableOpacity style={styles.captureButton} onPress={takePhoto}>
-            <Text style={styles.captureText}>📸</Text>
-          </TouchableOpacity>
-        </>
-      )}
-    </View>
+        </AnimatedScrollView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 type LoginScreenProps = {
   onLogin: (username: string, password: string) => void;
 };
+
 function LoginScreen({ onLogin }: LoginScreenProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  
+  const translateY = useSharedValue(0);
+  const scale = useSharedValue(0.9);
+  const iconRotation = useSharedValue(0);
+
+  useEffect(() => {
+    translateY.value = withSpring(0, Animations.spring.bouncy);
+    scale.value = withSpring(1, Animations.spring.bouncy);
+    iconRotation.value = withSequence(
+      withTiming(360, { duration: 1000, easing: Easing.inOut(Easing.ease) }),
+      withTiming(0, { duration: 0 })
+    );
+  }, []);
+
+  const cardAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: translateY.value },
+      { scale: scale.value },
+    ],
+  }));
+
+  const iconAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${iconRotation.value}deg` }],
+  }));
+
+  const handleLogin = () => {
+    if (!username || !password) {
+      setError('Please enter username and password');
+      return;
+    }
+    setError('');
+    onLogin(username, password);
+  };
 
   return (
-    <View style={loginStyles.gradientBg}>
-      <View style={loginStyles.loginCard}>
-        <Text style={loginStyles.avatar}>🧑‍🚚</Text>
-        <Text style={loginStyles.title}>Welcome, Driver!</Text>
-        <Text style={loginStyles.subtitle}>Sign in to continue</Text>
-        <View style={loginStyles.inputContainer}>
+    <LinearGradient
+      colors={[Colors.dark, Colors.darkSecondary, Colors.primary]}
+      style={{ flex: 1 }}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 1, y: 1 }}
+    >
+      <SafeAreaView style={{ flex: 1 }}>
+        <View style={loginStyles.container}>
+          {/* Animated background elements */}
+          <Animated.View
+            style={[
+              loginStyles.backgroundCircle,
+              { top: -100, right: -100, backgroundColor: Colors.primaryLight + '20' },
+            ]}
+            entering={FadeIn.delay(200).duration(1000)}
+          />
+          <Animated.View
+            style={[
+              loginStyles.backgroundCircle,
+              { bottom: -150, left: -150, backgroundColor: Colors.secondary + '15' },
+            ]}
+            entering={FadeIn.delay(400).duration(1000)}
+          />
+          
+          <AnimatedView 
+            style={[loginStyles.loginCard, cardAnimatedStyle]}
+          >
+            <BlurView intensity={30} tint="dark" style={loginStyles.blurContainer}>
+              <View style={loginStyles.cardContent}>
+                <AnimatedView style={iconAnimatedStyle}>
+                  <View style={loginStyles.iconContainer}>
+                    <Text style={loginStyles.avatar}>🚚</Text>
+                  </View>
+                </AnimatedView>
+                
+                <AnimatedText 
+                  style={loginStyles.title}
+                  entering={FadeInDown.delay(500).duration(600)}
+                >
+                  Welcome Back!
+                </AnimatedText>
+                
+                <AnimatedText 
+                  style={loginStyles.subtitle}
+                  entering={FadeInDown.delay(600).duration(600)}
+                >
+                  Sign in to manage your deliveries
+                </AnimatedText>
+                
+                <FadeInView delay={700} style={loginStyles.inputContainer}>
           <Text style={loginStyles.label}>Username</Text>
+                  <View style={loginStyles.inputWrapper}>
           <TextInput
             style={loginStyles.input}
             value={username}
             onChangeText={setUsername}
-            placeholder="Enter username"
+                      placeholder="Enter your username"
             autoCapitalize="none"
-            placeholderTextColor="#aaa"
+                      placeholderTextColor={Colors.textTertiary}
           />
+                    <View style={loginStyles.inputIcon}>
+                      <Text>👤</Text>
         </View>
-        <View style={loginStyles.inputContainer}>
+                  </View>
+                </FadeInView>
+                
+                <FadeInView delay={800} style={loginStyles.inputContainer}>
           <Text style={loginStyles.label}>Password</Text>
+                  <View style={loginStyles.inputWrapper}>
           <TextInput
             style={loginStyles.input}
             value={password}
             onChangeText={setPassword}
-            placeholder="Enter password"
-            secureTextEntry
-            placeholderTextColor="#aaa"
-          />
-        </View>
-        {error ? <Text style={loginStyles.error}>{error}</Text> : null}
+                      placeholder="Enter your password"
+                      secureTextEntry={!showPassword}
+                      placeholderTextColor={Colors.textTertiary}
+                    />
         <TouchableOpacity
-          style={loginStyles.button}
-          activeOpacity={0.8}
-          onPress={() => {
-            if (!username || !password) {
-              setError('Please enter username and password');
-              return;
-            }
-            setError('');
-            onLogin(username, password);
-          }}
-        >
-          <Text style={loginStyles.buttonText}>Login</Text>
+                      style={loginStyles.inputIcon}
+                      onPress={() => setShowPassword(!showPassword)}
+                    >
+                      <Text>{showPassword ? '👁️' : '🔒'}</Text>
         </TouchableOpacity>
       </View>
+                </FadeInView>
+                
+                {error ? (
+                  <AnimatedText 
+                    style={loginStyles.error}
+                    entering={FadeIn.duration(300)}
+                  >
+                    {error}
+                  </AnimatedText>
+                ) : null}
+                
+                <FadeInView delay={900} style={{ width: '100%', marginTop: Spacing.lg }}>
+                  <AnimatedButton
+                    onPress={handleLogin}
+                    variant="primary"
+                    size="large"
+                    style={{ width: '100%' }}
+                  >
+                    <LinearGradient
+                      colors={[Colors.primary, Colors.primaryDark]}
+                      style={loginStyles.gradientButton}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                    >
+                      <Text style={loginStyles.buttonText}>Sign In</Text>
+                    </LinearGradient>
+                  </AnimatedButton>
+                </FadeInView>
+                
+                <FadeInView delay={1000}>
+                  <TouchableOpacity style={{ marginTop: Spacing.md }}>
+                    <Text style={loginStyles.forgotPassword}>Forgot Password?</Text>
+                  </TouchableOpacity>
+                </FadeInView>
     </View>
+            </BlurView>
+          </AnimatedView>
+        </View>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
+
 // Login screen styles
 const loginStyles = StyleSheet.create({
-  gradientBg: {
+  container: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'linear-gradient(135deg, #2196F3 0%, #6DD5FA 100%)', // fallback for now
-    paddingHorizontal: 24,
+    paddingHorizontal: Spacing.lg,
+  },
+  backgroundCircle: {
+    position: 'absolute',
+    width: 400,
+    height: 400,
+    borderRadius: 200,
   },
   loginCard: {
     width: '100%',
-    maxWidth: 370,
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 28,
+    maxWidth: 400,
+    borderRadius: BorderRadius.xxl,
+    overflow: 'hidden',
+    ...Shadows.xl,
+  },
+  blurContainer: {
+    width: '100%',
+    borderRadius: BorderRadius.xxl,
+  },
+  cardContent: {
+    padding: Spacing.xl,
     alignItems: 'center',
-    shadowColor: '#2196F3',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    elevation: 8,
+    backgroundColor: Colors.glass,
+  },
+  iconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: Colors.primary + '20',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Spacing.lg,
+    ...Shadows.lg,
   },
   avatar: {
     fontSize: 48,
-    marginBottom: 12,
   },
   title: {
-    fontSize: 26,
-    fontWeight: 'bold',
-    color: '#2196F3',
-    marginBottom: 4,
+    ...Typography.h1,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.xs,
+    textAlign: 'center',
   },
   subtitle: {
-    fontSize: 16,
-    color: '#666',
-    marginBottom: 24,
+    ...Typography.body,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.xl,
+    textAlign: 'center',
   },
   inputContainer: {
     width: '100%',
-    marginBottom: 18,
+    marginBottom: Spacing.lg,
   },
   label: {
-    fontSize: 15,
-    color: '#2196F3',
-    marginBottom: 6,
-    fontWeight: '600',
+    ...Typography.bodyBold,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.sm,
+  },
+  inputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.darkTertiary,
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+    borderColor: Colors.glassLight,
   },
   input: {
-    backgroundColor: '#f5f7fa',
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: '#b3e0fc',
-    paddingHorizontal: 16,
-    paddingVertical: 13,
+    flex: 1,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
     fontSize: 16,
-    color: '#222',
-    width: '100%',
-    marginBottom: 8,
+    color: Colors.textPrimary,
   },
-  button: {
-    backgroundColor: '#2196F3',
-    paddingHorizontal: 36,
-    paddingVertical: 14,
-    borderRadius: 10,
-    marginTop: 16,
+  inputIcon: {
+    paddingHorizontal: Spacing.md,
+  },
+  gradientButton: {
     width: '100%',
+    paddingVertical: Spacing.lg,
+    borderRadius: BorderRadius.lg,
     alignItems: 'center',
-    shadowColor: '#2196F3',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.18,
-    shadowRadius: 8,
-    elevation: 4,
+    justifyContent: 'center',
   },
   buttonText: {
-    color: '#fff',
+    ...Typography.bodyBold,
+    color: Colors.textPrimary,
     fontSize: 18,
-    fontWeight: 'bold',
     letterSpacing: 1,
   },
   error: {
-    color: 'red',
-    marginBottom: 8,
-    fontSize: 14,
+    ...Typography.caption,
+    color: Colors.error,
+    marginBottom: Spacing.md,
+    textAlign: 'center',
+  },
+  forgotPassword: {
+    ...Typography.caption,
+    color: Colors.primaryLight,
+    textAlign: 'center',
+  },
+});
+
+// Home screen styles
+const homeStyles = StyleSheet.create({
+  welcomeSection: {
+    marginBottom: Spacing.xl,
+  },
+  welcomeText: {
+    ...Typography.body,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.xs,
+  },
+  userName: {
+    ...Typography.h2,
+    color: Colors.textPrimary,
+  },
+  statsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.lg,
+    gap: Spacing.md,
+  },
+  statCard: {
+    flex: 1,
+    alignItems: 'center',
+    padding: Spacing.lg,
+  },
+  statIconContainer: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: Colors.primary + '20',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
+  },
+  statIcon: {
+    fontSize: 24,
+  },
+  statNumber: {
+    ...Typography.h3,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.xs,
+  },
+  statLabel: {
+    ...Typography.caption,
+    color: Colors.textSecondary,
+  },
+  locationCard: {
+    marginBottom: Spacing.lg,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  gradientOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    opacity: 0.5,
+  },
+  locationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+  },
+  locationIconWrapper: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: Colors.primary + '30',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Spacing.md,
+  },
+  locationIcon: {
+    fontSize: 20,
+  },
+  locationTitle: {
+    ...Typography.bodyBold,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.xs,
+  },
+  locationText: {
+    ...Typography.caption,
+    color: Colors.textSecondary,
+  },
+  mainActionCard: {
+    position: 'relative',
+    overflow: 'hidden',
+    alignItems: 'center',
+    padding: Spacing.xl,
+    marginBottom: Spacing.xl,
+  },
+  gradientBackground: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    opacity: 0.9,
+  },
+  actionIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: Colors.glass,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Spacing.lg,
+    ...Shadows.lg,
+  },
+  actionIcon: {
+    fontSize: 48,
+  },
+  actionTitle: {
+    ...Typography.h3,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.sm,
+    textAlign: 'center',
+  },
+  actionDescription: {
+    ...Typography.body,
+    color: Colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: Spacing.lg,
+  },
+  buttonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  buttonIcon: {
+    fontSize: 20,
+  },
+  actionButtonText: {
+    ...Typography.bodyBold,
+    color: Colors.textPrimary,
+    fontSize: 16,
+  },
+  sectionTitle: {
+    ...Typography.h4,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.md,
+  },
+  quickActionsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.md,
+  },
+  quickActionCard: {
+    flex: 1,
+    minWidth: '45%',
+    padding: 0,
+  },
+  quickActionContent: {
+    alignItems: 'center',
+    padding: Spacing.lg,
+  },
+  quickActionIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
+  },
+  quickActionText: {
+    ...Typography.caption,
+    color: Colors.textPrimary,
   },
 });
 
@@ -522,6 +937,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
     paddingVertical: 14,
     borderRadius: 8,
+    alignSelf: 'center',
+    margin: 16,
   },
   buttonText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -764,107 +1181,147 @@ const styles = StyleSheet.create({
   },
 });
 
-// Move Header to top-level and use on all screens
+// Modern App Header Component
 function AppHeader({ onBack, onSignOut, user }: { onBack?: () => void; onSignOut?: () => void; user?: User | null }) {
+  const scaleAnim = useSharedValue(1);
+  
+  const handlePressIn = () => {
+    'worklet';
+    scaleAnim.value = withSpring(0.95, Animations.spring.default);
+  };
+  
+  const handlePressOut = () => {
+    'worklet';
+    scaleAnim.value = withSpring(1, Animations.spring.bouncy);
+  };
+
+  const buttonAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scaleAnim.value }],
+  }));
+
   return (
-    <View style={{
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: '#fff',
-      paddingVertical: 14,
-      paddingHorizontal: 18,
-      borderBottomLeftRadius: 24,
-      borderBottomRightRadius: 24,
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.10,
-      shadowRadius: 12,
-      elevation: 8,
-      marginBottom: 8,
-    }}>
+    <BlurView intensity={80} tint="dark" style={headerStyles.container}>
+      <View style={headerStyles.content}>
       {onBack ? (
-        <TouchableOpacity
-          style={{
-            width: 38,
-            height: 38,
-            borderRadius: 19,
-            backgroundColor: '#f1f5f9',
-            justifyContent: 'center',
-            alignItems: 'center',
-            marginRight: 10,
-          }}
+          <AnimatedButton
           onPress={onBack}
-        >
-          <Text style={{ fontSize: 22, color: '#2563eb', fontWeight: 'bold' }}>←</Text>
-        </TouchableOpacity>
-      ) : <View style={{width: 38, marginRight: 10}} />}
-      {/* Profile Icon/Logo */}
-      <View style={{
-        width: 44,
-        height: 44,
-        borderRadius: 22,
-        backgroundColor: '#e0e7ef',
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginRight: 12,
-        shadowColor: '#2563eb',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.10,
-        shadowRadius: 4,
-      }}>
-        {/* Replace emoji with your logo if available */}
-        <Text style={{ fontSize: 26 }}>🧑‍🚚</Text>
-      </View>
-      {/* Name and License, responsive */}
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text
-          style={{
-            color: '#0f172a',
-            fontWeight: 'bold',
-            fontSize: SCREEN_WIDTH < 350 ? 13 : SCREEN_WIDTH < 400 ? 15 : 17,
-            maxWidth: SCREEN_WIDTH < 350 ? 80 : SCREEN_WIDTH < 400 ? 120 : 160,
-          }}
-          numberOfLines={1}
-          ellipsizeMode="tail"
-        >
+            variant="glass"
+            size="small"
+            style={headerStyles.backButton}
+          >
+            <Text style={headerStyles.backIcon}>←</Text>
+          </AnimatedButton>
+        ) : <View style={headerStyles.placeholder} />}
+        
+        <View style={headerStyles.userInfo}>
+          <LinearGradient
+            colors={[Colors.primary, Colors.primaryDark]}
+            style={headerStyles.avatarContainer}
+          >
+            <Text style={headerStyles.avatar}>🚚</Text>
+          </LinearGradient>
+          
+          <View style={headerStyles.userDetails}>
+            <Text style={headerStyles.userName} numberOfLines={1}>
           {user?.name || 'Driver'}
         </Text>
-        <Text
-          style={{
-            color: '#2563eb',
-            fontSize: SCREEN_WIDTH < 350 ? 10 : SCREEN_WIDTH < 400 ? 12 : 13,
-            maxWidth: SCREEN_WIDTH < 350 ? 80 : SCREEN_WIDTH < 400 ? 120 : 160,
-            fontWeight: '600',
-            marginTop: 1,
-          }}
-          numberOfLines={1}
-          ellipsizeMode="tail"
-        >
+            <Text style={headerStyles.userLicense} numberOfLines={1}>
           {user?.license || 'ABC123456'}
         </Text>
       </View>
-      <TouchableOpacity
-        style={{
-          width: 38,
-          height: 38,
-          borderRadius: 19,
-          backgroundColor: '#f1f5f9',
-          justifyContent: 'center',
-          alignItems: 'center',
-          marginLeft: 10,
-        }}
+        </View>
+        
+        {onSignOut && (
+          <AnimatedButton
         onPress={onSignOut}
-        accessibilityLabel="Sign out"
+            variant="glass"
+            size="small"
+            style={headerStyles.signOutButton}
       >
-        <Text style={{ fontSize: 20, color: '#ef4444', fontWeight: 'bold' }}>⎋</Text>
-      </TouchableOpacity>
+            <Text style={headerStyles.signOutIcon}>↗</Text>
+          </AnimatedButton>
+        )}
     </View>
+    </BlurView>
   );
 }
+
+// Header styles
+const headerStyles = StyleSheet.create({
+  container: {
+    paddingTop: Platform.OS === 'ios' ? 0 : StatusBar.currentHeight || 0,
+    paddingBottom: Spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.glassLight,
+  },
+  content: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.lg,
+    height: 60,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+  },
+  backIcon: {
+    fontSize: 20,
+    color: Colors.primary,
+    fontWeight: 'bold',
+  },
+  placeholder: {
+    width: 40,
+    height: 40,
+  },
+  userInfo: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: Spacing.md,
+  },
+  avatarContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Spacing.sm,
+    ...Shadows.md,
+  },
+  avatar: {
+    fontSize: 24,
+  },
+  userDetails: {
+    flex: 1,
+  },
+  userName: {
+    ...Typography.bodyBold,
+    color: Colors.textPrimary,
+  },
+  userLicense: {
+    ...Typography.caption,
+    color: Colors.textSecondary,
+    marginTop: 2,
+  },
+  signOutButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+  },
+  signOutIcon: {
+    fontSize: 18,
+    color: Colors.error,
+    fontWeight: 'bold',
+  },
+});
 
 // Camera & AI Classification Screen
 type CameraAIScreenProps = {
   navigation: StackNavigationProp<RootStackParamList, 'CameraAI'>;
+  user?: User | null;
+  setIsAuthenticated?: (value: boolean) => void;
+  setUser?: (value: User | null) => void;
 };
 
 function SuccessScreen({
@@ -882,8 +1339,6 @@ function SuccessScreen({
 }) {
   return (
     <View style={{ flex: 1, backgroundColor: '#10131a' }}>
-      {/* Constant header at top */}
-      {/* <AppHeader user={user} onSignOut={onSignOut} /> */}
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 0 }}>
         <View style={{ width: '100%', maxWidth: 440, flex: 1, justifyContent: 'center', alignItems: 'center', alignSelf: 'center' }}>
           <View style={{ backgroundColor: '#fff', borderRadius: 28, paddingHorizontal: 0, paddingVertical: 0, alignItems: 'center', shadowColor: '#2196F3', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.13, shadowRadius: 16, elevation: 8, width: '100%', maxWidth: 420, flex: 1, marginVertical: 24 }}>
@@ -921,16 +1376,265 @@ function SuccessScreen({
   );
 }
 
-function CameraAIScreen({ navigation, user, onSignOut }) {
-  const [photoUri, setPhotoUri] = useState<string | null>(null); // Only set after confirmation
+// Items List Screen
+interface ItemsListScreenProps {
+  navigation: StackNavigationProp<RootStackParamList, 'ItemsList'>;
+  user: User | null;
+  setIsAuthenticated?: (isAuthenticated: boolean) => void;
+  setUser?: (user: User | null) => void;
+}
+
+function ItemsListScreen({ navigation, user, setIsAuthenticated, setUser }: ItemsListScreenProps) {
+  const [items, setItems] = useState<CapturedItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const loadItems = async () => {
+    try {
+      const storedItems = await StorageService.getItems();
+      setItems(storedItems);
+    } catch (error) {
+      console.error('Error loading items:', error);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadItems();
+  }, []);
+
+  const handleRefresh = () => {
+    setRefreshing(true);
+    loadItems();
+  };
+
+  const handleDeleteItem = async (id: string) => {
+    Alert.alert(
+      'Delete Item',
+      'Are you sure you want to delete this item?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await StorageService.deleteItem(id);
+              loadItems();
+            } catch (error) {
+              Alert.alert('Error', 'Failed to delete item');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const renderItem = (item: CapturedItem) => (
+    <FadeInView key={item.id}>
+      <AnimatedCard
+        variant="glass"
+        style={{
+          marginHorizontal: Spacing.lg,
+          marginBottom: Spacing.md,
+          padding: Spacing.lg,
+        }}
+      >
+        <View style={{ flexDirection: 'row', gap: Spacing.md }}>
+          {item.photoUri && (
+            <Image
+              source={{ uri: item.photoUri }}
+              style={{
+                width: 80,
+                height: 80,
+                borderRadius: BorderRadius.md,
+                backgroundColor: Colors.darkSecondary,
+              }}
+            />
+          )}
+          <View style={{ flex: 1 }}>
+            <Text style={[Typography.h4, { color: Colors.textPrimary, marginBottom: Spacing.xs, fontSize: 18, fontWeight: '600' }]}>
+              {item.wasteType}
+            </Text>
+            {item.description && (
+              <Text style={[Typography.body, { color: Colors.textSecondary, marginBottom: Spacing.xs, fontSize: 15 }]}>
+                {item.description}
+              </Text>
+            )}
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.xs }}>
+              {item.volume && (
+                <View style={itemStyles.tag}>
+                  <Text style={itemStyles.tagText}>📦 {item.volume}</Text>
+                </View>
+              )}
+              {item.weight && (
+                <View style={itemStyles.tag}>
+                  <Text style={itemStyles.tagText}>⚖️ {item.weight}</Text>
+                </View>
+              )}
+              {item.location && (
+                <View style={itemStyles.tag}>
+                  <Text style={itemStyles.tagText}>📍 {LocationService.formatLocation(item.location).substring(0, 20)}...</Text>
+                </View>
+              )}
+            </View>
+            <Text style={[Typography.caption, { color: Colors.textTertiary, marginTop: Spacing.xs, fontSize: 13 }]}>
+              {new Date(item.capturedAt).toLocaleString()}
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => handleDeleteItem(item.id)}
+            style={{ padding: Spacing.sm }}
+          >
+            <Ionicons name="trash-outline" size={20} color={Colors.error} />
+          </TouchableOpacity>
+        </View>
+      </AnimatedCard>
+    </FadeInView>
+  );
+
+  return (
+    <View style={{ flex: 1, backgroundColor: Colors.dark }}>
+      <LinearGradient
+        colors={[Colors.primaryDark, Colors.dark]}
+        style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+      />
+      <SafeAreaView style={{ flex: 1 }}>
+        <AppHeader
+          user={user}
+          onBack={() => navigation.goBack()}
+          onSignOut={() => {
+            if (setIsAuthenticated && setUser) {
+              setIsAuthenticated(false);
+              setUser(null);
+            }
+          }}
+        />
+        
+        <View style={{ paddingHorizontal: Spacing.lg, paddingTop: Spacing.md, paddingBottom: Spacing.sm }}>
+          <Text style={[Typography.h1, { color: Colors.gray[50] }]}>Captured Items</Text>
+          <Text style={[Typography.body, { color: Colors.textSecondary }]}>
+            {items.length} {items.length === 1 ? 'item' : 'items'} captured
+          </Text>
+        </View>
+
+        {loading ? (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <ActivityIndicator size="large" color={Colors.primary} />
+          </View>
+        ) : items.length === 0 ? (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: Spacing.xl }}>
+            <Text style={homeStyles.actionIcon}>📸</Text>
+            <Text style={[Typography.h2, { color: Colors.gray[50], textAlign: 'center', marginTop: Spacing.lg }]}>
+              No items captured yet
+            </Text>
+            <Text style={[Typography.body, { color: Colors.textSecondary, textAlign: 'center', marginTop: Spacing.sm }]}>
+              Start capturing furniture items to build your inventory
+            </Text>
+            <AnimatedButton
+              onPress={() => navigation.navigate('CameraAI')}
+              variant="primary"
+              size="large"
+              style={{ marginTop: Spacing.xl }}
+            >
+              <Text style={{ color: Colors.gray[50], fontWeight: '600' }}>Start Capturing</Text>
+            </AnimatedButton>
+          </View>
+        ) : (
+          <ScrollView
+            contentContainerStyle={{ paddingBottom: Spacing.xl }}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={handleRefresh}
+                tintColor={Colors.primary}
+              />
+            }
+          >
+            {items.map(renderItem)}
+          </ScrollView>
+        )}
+      </SafeAreaView>
+    </View>
+  );
+}
+
+const itemStyles = StyleSheet.create({
+  tag: {
+    backgroundColor: Colors.darkTertiary,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+    borderRadius: BorderRadius.sm,
+    borderWidth: 1,
+    borderColor: Colors.darkTertiary,
+  },
+  tagText: {
+    fontSize: 13,
+    color: Colors.textSecondary,
+    fontWeight: '600',
+  },
+});
+
+const formStyles = StyleSheet.create({
+  iconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: Colors.primary + '15',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: Spacing.md,
+  },
+  selectButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: Colors.darkSecondary,
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    borderColor: Colors.darkTertiary,
+  },
+  inputContainer: {
+    backgroundColor: Colors.darkSecondary,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderWidth: 1,
+    borderColor: Colors.darkTertiary,
+  },
+  input: {
+    fontSize: 16,
+    color: Colors.textPrimary,
+    padding: 0,
+    margin: 0,
+  },
+  inputLabel: {
+    fontSize: 14,
+    color: Colors.textSecondary,
+    marginBottom: 6,
+    fontWeight: '500',
+  },
+});
+
+function CameraAIScreen({ navigation, user, setIsAuthenticated, setUser }: CameraAIScreenProps) {
+  // All state declarations must come first, before any conditions
+  const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isClassifying, setIsClassifying] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
   const [showVolumeForm, setShowVolumeForm] = useState(false);
   const [result, setResult] = useState<string>('');
   const [showConfirmPhoto, setShowConfirmPhoto] = useState(false);
-  const [pendingPhotoUri, setPendingPhotoUri] = useState<string | null>(null); // Holds photo before confirmation
+  const [pendingPhotoUri, setPendingPhotoUri] = useState<string | null>(null);
   const [showSuccess, setShowSuccess] = useState(false);
   const [submittedInfo, setSubmittedInfo] = useState<Record<string, string>>({});
+
+  // Camera permissions
+  const [permission, requestPermission] = useCameraPermissions();
+  const [type, setType] = useState<CameraType>('back');
 
   // Manual form state
   const [manualWasteType, setManualWasteType] = useState('');
@@ -941,27 +1645,31 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
   const [notes, setNotes] = useState('');
   // Dropdown state
   const [showVolumeDropdown, setShowVolumeDropdown] = useState(false);
-  const volumeDropdownAnim = useRef(new Animated.Value(0)).current;
+  const volumeDropdownAnim = useSharedValue(0);
   // Manual dimensions
   const [height, setHeight] = useState('');
   const [width, setWidth] = useState('');
   const [breadth, setBreadth] = useState('');
-  // Animate dropdown open/close
-  useEffect(() => {
-    if (showVolumeDropdown) {
-      Animated.timing(volumeDropdownAnim, {
-        toValue: 1,
-        duration: 220,
-        useNativeDriver: true,
-      }).start();
-    } else {
-      Animated.timing(volumeDropdownAnim, {
-        toValue: 0,
-        duration: 180,
-        useNativeDriver: true,
-      }).start();
-    }
-  }, [showVolumeDropdown]);
+
+  // All refs must come before any conditions
+  const camera = useRef<CameraView>(null);
+  const fadeAnim = useSharedValue(0);
+
+  // Location state
+  const [captureLocation, setCaptureLocation] = useState<{ latitude: number; longitude: number; address?: string } | null>(null);
+  const [locationLoading, setLocationLoading] = useState(false);
+
+  // Animated styles - must be defined before any conditions
+  const dropdownAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: volumeDropdownAnim.value,
+    transform: [{ scale: interpolate(volumeDropdownAnim.value, [0, 1], [0.98, 1]) }],
+  }));
+
+  const fadeAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: fadeAnim.value
+  }));
+
+  // Removed duplicate animation logic - handled in onPress handlers
 
   // Auto-suggest weight when volume changes
   useEffect(() => {
@@ -969,31 +1677,38 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
     if (found) setWeight(found.weight);
   }, [volume]);
 
-  const camera = useRef<any>(null);
-  const devices = useCameraDevices();
-  const device = Array.isArray(devices)
-    ? devices.find((d) => d.position === 'back') || devices[0]
-    : undefined;
-  const [fadeAnim] = useState(new Animated.Value(0));
-
   useEffect(() => {
     if (!isClassifying && photoUri) {
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 500,
-        useNativeDriver: true,
-      }).start();
+      fadeAnim.value = withTiming(1, { duration: 500 });
     } else {
-      fadeAnim.setValue(0);
+      fadeAnim.value = 0;
     }
   }, [isClassifying, photoUri]);
 
   const takePhoto = async () => {
-    if (camera.current == null) return;
-    // @ts-ignore
-    const photo = await camera.current.takePhoto({ flash: 'off' });
-    setPendingPhotoUri('file://' + photo.path);
+    if (camera.current) {
+      try {
+        // Start capturing location in background
+        setLocationLoading(true);
+        LocationService.getCurrentLocation().then(location => {
+          setCaptureLocation(location);
+          setLocationLoading(false);
+        }).catch(err => {
+          console.log('Location error:', err);
+          setLocationLoading(false);
+        });
+
+        const photo = await camera.current.takePictureAsync({
+          quality: 0.8,
+          base64: false,
+        });
+        setPendingPhotoUri(photo.uri);
     setShowConfirmPhoto(true);
+      } catch (error) {
+        Alert.alert('Error', 'Failed to take photo');
+        console.error('Camera error:', error);
+      }
+    }
   };
 
   const handleConfirmPhoto = () => {
@@ -1013,12 +1728,39 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
   };
 
   // Success screen handlers
-  const handleShowSuccess = (info: Record<string, string>) => {
+  const handleShowSuccess = async (info: Record<string, string>) => {
+    // Save item to storage
+    const item: CapturedItem = {
+      id: Date.now().toString(),
+      photoUri: photoUri || '',
+      wasteType: info['Item Type'] || result || 'Unknown',
+      description: info['Description'] || manualDescription,
+      volume: info['Volume'] || volume,
+      weight: info['Weight'] || weight,
+      dimensions: (height || width || breadth) ? {
+        height: info['Height'] || height,
+        width: info['Width'] || width,
+        breadth: info['Depth'] || breadth,
+      } : undefined,
+      notes: info['Notes'] || notes,
+      location: captureLocation || undefined,
+      capturedAt: new Date().toISOString(),
+      capturedBy: user?.name || 'Unknown',
+    };
+
+    try {
+      await StorageService.saveItem(item);
+      console.log('Item saved successfully');
+    } catch (error) {
+      console.error('Error saving item:', error);
+    }
+
     setSubmittedInfo(info);
     setShowManualForm(false);
     setShowVolumeForm(false);
     setShowSuccess(true);
   };
+
   const handleBackToHome = () => {
     setShowSuccess(false);
     setPhotoUri(null);
@@ -1034,14 +1776,43 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
     navigation.popToTop();
   };
 
+  if (!permission) {
   return (
-    <View style={{ flex: 1, backgroundColor: '#10131a' }}>
-      <AppHeader user={user} onBack={() => navigation.goBack()} onSignOut={onSignOut} />
-      <View style={{ width: '100%', alignItems: 'flex-start', paddingLeft: 28, marginTop: 10, marginBottom: 8 }}>
-        <Text style={{ color: '#64748b', fontSize: 15, fontWeight: '600', letterSpacing: 0.5 }}>
-          Camera & AI Classification
-        </Text>
+      <View style={styles.centered}>
+        <Text>Requesting camera permission...</Text>
       </View>
+    );
+  }
+
+  if (!permission.granted) {
+    return (
+      <View style={styles.centered}>
+        <Text>No access to camera. Please enable camera permissions in settings.</Text>
+        <TouchableOpacity style={styles.button} onPress={requestPermission}>
+          <Text style={styles.buttonText}>Grant Permission</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.button} onPress={() => navigation.goBack()}>
+          <Text style={styles.buttonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ flex: 1, backgroundColor: Colors.dark }}>
+      <SafeAreaView style={{ flex: 1 }}>
+        <AppHeader 
+          user={user} 
+          onBack={() => navigation.goBack()} 
+          onSignOut={() => { 
+            if (setIsAuthenticated && setUser) {
+              setIsAuthenticated(false); 
+              setUser(null);
+            }
+          }} 
+        />
+        <View style={{ flex: 1 }}>
+      
       {/* Success Screen */}
       {showSuccess && (
         <SuccessScreen
@@ -1049,28 +1820,32 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
           onBackToHome={handleBackToHome}
           photoUri={photoUri}
           user={user}
-          onSignOut={onSignOut}
+          onSignOut={() => { 
+            if (setIsAuthenticated && setUser) {
+              setIsAuthenticated(false); 
+              setUser(null);
+            }
+          }}
         />
       )}
-      {/* Show camera first, only show forms/classification after photo is taken */}
-      {!showSuccess && !pendingPhotoUri && !photoUri && !isClassifying && !showManualForm && !showVolumeForm && device && !showConfirmPhoto && (
-        <>
-          <Camera
+
+          {/* Camera View */}
+          {!showSuccess && !pendingPhotoUri && !photoUri && !isClassifying && !showManualForm && !showVolumeForm && !showConfirmPhoto && (
+            <View style={{ flex: 1 }}>
+              <CameraView
             ref={camera}
-            style={{ flex: 1, borderRadius: 24, margin: 16, overflow: 'hidden' }}
-            device={device}
-            isActive={true}
-            photo={true}
-          />
+                style={{ flex: 1 }}
+                facing={type}
+              />
+              <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, paddingBottom: 40, alignItems: 'center' }}>
           <TouchableOpacity style={styles.captureButton} onPress={takePhoto}>
             <Text style={styles.captureText}>📸</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.button, { marginTop: 24 }]} onPress={() => navigation.goBack()}>
-            <Text style={styles.buttonText}>Back</Text>
-          </TouchableOpacity>
-        </>
-      )}
-      {/* Photo confirmation screen (separate step, only before classification) */}
+              </View>
+            </View>
+          )}
+
+      {/* Photo confirmation screen */}
       {!showSuccess && showConfirmPhoto && pendingPhotoUri && !isClassifying && !showManualForm && !showVolumeForm && (
         <ScrollView
           style={{ flex: 1, backgroundColor: '#10131a' }}
@@ -1134,6 +1909,7 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
           </View>
         </ScrollView>
       )}
+
       {/* Manual Verification Form */}
       {!showSuccess && showManualForm && photoUri && (
         <ScrollView contentContainerStyle={[styles.resultScrollContent, { paddingTop: 10, alignItems: 'center' }]}> 
@@ -1165,7 +1941,15 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
             <TouchableOpacity
               style={[styles.formInput, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 14 }]}
               activeOpacity={0.8}
-              onPress={() => setShowVolumeDropdown(true)}
+              onPress={() => {
+                if (!showVolumeDropdown) {
+                  setShowVolumeDropdown(true);
+                  volumeDropdownAnim.value = withTiming(1, { duration: 200 });
+                } else {
+                  setShowVolumeDropdown(false);
+                  volumeDropdownAnim.value = withTiming(0, { duration: 200 });
+                }
+              }}
             >
               <Text style={{ color: volume ? '#222' : '#aaa', fontSize: 16 }}>
                 {VOLUME_OPTIONS.find(opt => opt.value === volume)?.label || 'Select volume'}
@@ -1173,12 +1957,12 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
               <Text style={{ fontSize: 18, color: '#2563eb', marginLeft: 8 }}>▼</Text>
             </TouchableOpacity>
             {showVolumeDropdown && (
-              <Animated.View
-                style={{
+              <AnimatedView
+                style={[{
                   position: 'absolute',
                   left: 0,
                   right: 0,
-                  top: 180,
+                  top: 235,
                   zIndex: 100,
                   backgroundColor: '#fff',
                   borderRadius: 12,
@@ -1188,9 +1972,7 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
                   shadowOpacity: 0.13,
                   shadowRadius: 12,
                   elevation: 8,
-                  opacity: volumeDropdownAnim,
-                  transform: [{ scale: volumeDropdownAnim.interpolate({ inputRange: [0, 1], outputRange: [0.98, 1] }) }],
-                }}
+                }, dropdownAnimatedStyle]}
               >
                 {VOLUME_OPTIONS.map(opt => (
                   <TouchableOpacity
@@ -1203,14 +1985,18 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
                       borderBottomColor: '#f1f5f9',
                     }}
                     onPress={() => {
+                      console.log('Selected from old dropdown:', opt.value);
                       setVolume(opt.value);
+                      setTimeout(() => {
                       setShowVolumeDropdown(false);
+                        volumeDropdownAnim.value = withTiming(0, { duration: 200 });
+                      }, 100);
                     }}
                   >
                     <Text style={{ color: '#222', fontWeight: volume === opt.value ? 'bold' : 'normal', fontSize: 16 }}>{opt.label}</Text>
                   </TouchableOpacity>
                 ))}
-              </Animated.View>
+              </AnimatedView>
             )}
             <Text style={styles.classificationLabel}>Weight (kg)</Text>
             <TextInput
@@ -1282,179 +2068,482 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
           </View>
         </ScrollView>
       )}
+
       {/* Volume/Weight Form for Correct Classification */}
       {!showSuccess && showVolumeForm && photoUri && (
-        <ScrollView contentContainerStyle={[styles.resultScrollContent, { paddingTop: 10, alignItems: 'center' }]}> 
-          <Text style={styles.verifyHeading}>Volume & Weight Estimation</Text>
-          <View style={styles.sectionDivider} />
-          <View style={{ width: '100%', aspectRatio: 1, maxWidth: 500, marginBottom: 24, alignSelf: 'center', backgroundColor: '#222', borderRadius: 22, borderWidth: 2, borderColor: '#2196F3', overflow: 'hidden' }}>
-            <Image source={{ uri: photoUri || undefined }} style={{ width: '100%', height: '100%', resizeMode: 'contain', borderRadius: 22 }} />
-          </View>
-          <View style={styles.sectionDivider} />
-          <View style={{ width: SCREEN_WIDTH > 420 ? 400 : '100%' }}>
-            <Text style={styles.classificationLabel}>Volume</Text>
-            <TouchableOpacity
-              style={[styles.formInput, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 14 }]}
-              activeOpacity={0.8}
-              onPress={() => setShowVolumeDropdown(true)}
+        <View style={{ flex: 1, backgroundColor: Colors.dark }}>
+          <AnimatedScrollView
+            contentContainerStyle={{ paddingBottom: 40 }}
+            showsVerticalScrollIndicator={false}
+            style={{ flex: 1 }}
+          >
+            {/* Modern Header */}
+            <LinearGradient
+              colors={[Colors.primaryDark, Colors.dark]}
+              style={{ paddingTop: 20, paddingBottom: 30 }}
             >
-              <Text style={{ color: volume ? '#222' : '#aaa', fontSize: 16 }}>
-                {VOLUME_OPTIONS.find(opt => opt.value === volume)?.label || 'Select volume'}
+              <Text style={[Typography.h1, { color: Colors.gray[50], textAlign: 'center', marginBottom: 8 }]}>
+                Item Details
               </Text>
-              <Text style={{ fontSize: 18, color: '#2563eb', marginLeft: 8 }}>▼</Text>
-            </TouchableOpacity>
-            {showVolumeDropdown && (
-              <Animated.View
+              <Text style={[Typography.body, { color: Colors.textSecondary, textAlign: 'center' }]}>
+                Add information about this {result || 'furniture item'}
+              </Text>
+            </LinearGradient>
+            
+            <View style={{ paddingHorizontal: Spacing.lg }}>
+              {/* Photo Preview Card */}
+              <AnimatedCard
+                variant="glass"
                 style={{
-                  position: 'absolute',
-                  left: 0,
-                  right: 0,
-                  top: 180,
-                  zIndex: 100,
-                  backgroundColor: '#fff',
-                  borderRadius: 12,
-                  marginHorizontal: 24,
-                  shadowColor: '#000',
-                  shadowOffset: { width: 0, height: 4 },
-                  shadowOpacity: 0.13,
-                  shadowRadius: 12,
-                  elevation: 8,
-                  opacity: volumeDropdownAnim,
-                  transform: [{ scale: volumeDropdownAnim.interpolate({ inputRange: [0, 1], outputRange: [0.98, 1] }) }],
+                  marginTop: -20,
+                  marginBottom: Spacing.lg,
+                  padding: Spacing.md,
                 }}
               >
-                {VOLUME_OPTIONS.map(opt => (
-                  <TouchableOpacity
-                    key={opt.value}
+                <View style={{ aspectRatio: 16/9, backgroundColor: Colors.darkSecondary, borderRadius: BorderRadius.lg, overflow: 'hidden' }}>
+                  <Image source={{ uri: photoUri || undefined }} style={{ width: '100%', height: '100%', resizeMode: 'cover' }} />
+                  <LinearGradient
+                    colors={['transparent', 'rgba(0,0,0,0.7)']}
                     style={{
-                      paddingVertical: 16,
-                      paddingHorizontal: 18,
-                      backgroundColor: volume === opt.value ? '#e0e7ef' : '#fff',
-                      borderBottomWidth: 1,
-                      borderBottomColor: '#f1f5f9',
-                    }}
-                    onPress={() => {
-                      setVolume(opt.value);
-                      setShowVolumeDropdown(false);
+                      position: 'absolute',
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      height: 80,
+                      justifyContent: 'flex-end',
+                      padding: Spacing.md,
                     }}
                   >
-                    <Text style={{ color: '#222', fontWeight: volume === opt.value ? 'bold' : 'normal', fontSize: 16 }}>{opt.label}</Text>
+                    <Text style={[Typography.h4, { color: Colors.gray[50], fontSize: 18, fontWeight: '600' }]}>
+                      {result || 'Bulk Items (Furniture, appliances)'}
+                    </Text>
+                  </LinearGradient>
+          </View>
+                
+                {/* Location Card */}
+                <View style={{ marginTop: Spacing.md }}>
+                  <GlassmorphicCard style={{ padding: Spacing.md }}>
+                    {locationLoading ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                        <ActivityIndicator size="small" color={Colors.primary} />
+                        <Text style={[Typography.body, { color: Colors.textSecondary, marginLeft: Spacing.sm }]}>
+                          Getting location...
+                        </Text>
+                      </View>
+                    ) : captureLocation ? (
+                      <View>
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                          <View style={{
+                            width: 40,
+                            height: 40,
+                            borderRadius: 20,
+                            backgroundColor: Colors.primary + '20',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            marginRight: Spacing.md,
+                          }}>
+                            <Ionicons name="location" size={20} color={Colors.primary} />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[Typography.body, { color: Colors.textSecondary, fontSize: 14 }]}>Location</Text>
+                            <Text style={[Typography.bodyBold, { color: Colors.textPrimary, fontSize: 16 }]}>
+                              {LocationService.formatLocation(captureLocation)}
+                            </Text>
+                          </View>
+                        </View>
+                        <AnimatedButton
+                          variant="outline"
+                          size="small"
+                          onPress={async () => {
+                            setLocationLoading(true);
+                            const newLocation = await LocationService.getCurrentLocation();
+                            if (newLocation) {
+                              setCaptureLocation(newLocation);
+                            }
+                            setLocationLoading(false);
+                          }}
+                          style={{ marginTop: Spacing.sm, alignSelf: 'flex-end' }}
+                        >
+                          <Text style={[Typography.caption, { color: Colors.primary }]}>Update</Text>
+                        </AnimatedButton>
+                      </View>
+                    ) : (
+            <TouchableOpacity
+                        onPress={async () => {
+                          setLocationLoading(true);
+                          const location = await LocationService.getCurrentLocation();
+                          if (location) {
+                            setCaptureLocation(location);
+                          }
+                          setLocationLoading(false);
+                        }}
+                        style={{ alignItems: 'center', paddingVertical: Spacing.md }}
+                      >
+                        <View style={{
+                          width: 48,
+                          height: 48,
+                          borderRadius: 24,
+                          backgroundColor: Colors.primary + '20',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          marginBottom: Spacing.sm,
+                        }}>
+                          <Ionicons name="add-circle-outline" size={24} color={Colors.primary} />
+                        </View>
+                        <Text style={[Typography.body, { color: Colors.primary }]}>Add Location</Text>
+                      </TouchableOpacity>
+                    )}
+                  </GlassmorphicCard>
+                </View>
+              </AnimatedCard>
+
+              {/* Form Fields */}
+              <View style={{ gap: Spacing.lg }}>
+                {/* Volume Selection */}
+                <AnimatedCard variant="glass" style={{ padding: Spacing.lg }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.md }}>
+                    <View style={formStyles.iconContainer}>
+                      <Text style={{ fontSize: 20 }}>📦</Text>
+                    </View>
+                    <View>
+                      <Text style={[Typography.h4, { color: Colors.textPrimary, fontSize: 18 }]}>Volume</Text>
+                      <Text style={[Typography.body, { color: Colors.textSecondary, fontSize: 14 }]}>Estimated size</Text>
+                    </View>
+                  </View>
+                  <TouchableOpacity
+                    style={formStyles.selectButton}
+                    activeOpacity={0.8}
+                    onPress={() => {
+                      console.log('Volume button pressed, current state:', showVolumeDropdown);
+                      setShowVolumeDropdown(!showVolumeDropdown);
+                      volumeDropdownAnim.value = withTiming(showVolumeDropdown ? 0 : 1, { duration: 200 });
+                    }}
+                  >
+                    <Text style={[Typography.bodyBold, { color: volume ? Colors.textPrimary : Colors.textTertiary, fontSize: 16 }]}>
+                      {VOLUME_OPTIONS.find(opt => opt.value === volume)?.label || 'Select volume'}
+                    </Text>
+                    <Ionicons name="chevron-down" size={20} color={Colors.primary} />
                   </TouchableOpacity>
-                ))}
-              </Animated.View>
-            )}
-            <Text style={styles.classificationLabel}>Weight (kg)</Text>
+                </AnimatedCard>
+
+                {/* Weight and Dimensions */}
+                <AnimatedCard variant="glass" style={{ padding: Spacing.lg }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.md }}>
+                    <View style={formStyles.iconContainer}>
+                      <Text style={{ fontSize: 20 }}>⚖️</Text>
+                    </View>
+                    <Text style={[Typography.h4, { color: Colors.textPrimary, fontSize: 18 }]}>Weight & Dimensions</Text>
+                  </View>
+                  
+                  {/* Weight Input */}
+                  <View style={[formStyles.inputContainer, { marginBottom: Spacing.md }]}>
+                    <Text style={formStyles.inputLabel}>Weight (kg)</Text>
             <TextInput
-              style={[styles.formInput, { marginBottom: 12 }]}
+                      style={formStyles.input}
               value={weight}
               onChangeText={setWeight}
-              placeholder="Estimate weight"
-              placeholderTextColor="#aaa"
+                      placeholder="Estimated weight"
+                      placeholderTextColor={Colors.textSecondary}
               keyboardType="numeric"
             />
-            <Text style={styles.classificationLabel}>Height (cm)</Text>
+                  </View>
+                  
+                  {/* Dimensions Inputs */}
+                  <Text style={[Typography.body, { color: Colors.textSecondary, marginBottom: Spacing.sm, fontSize: 14 }]}>
+                    Dimensions (cm)
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: Spacing.sm }}>
+                    <View style={[formStyles.inputContainer, { flex: 1 }]}>
+                      <Text style={formStyles.inputLabel}>Height</Text>
             <TextInput
-              style={[styles.formInput, { marginBottom: 12 }]}
+                        style={formStyles.input}
               value={height}
               onChangeText={setHeight}
-              placeholder="Enter height"
-              placeholderTextColor="#aaa"
+                        placeholder="0"
+                        placeholderTextColor={Colors.textSecondary}
               keyboardType="numeric"
             />
-            <Text style={styles.classificationLabel}>Width (cm)</Text>
+                    </View>
+                    <View style={[formStyles.inputContainer, { flex: 1 }]}>
+                      <Text style={formStyles.inputLabel}>Width</Text>
             <TextInput
-              style={[styles.formInput, { marginBottom: 12 }]}
+                        style={formStyles.input}
               value={width}
               onChangeText={setWidth}
-              placeholder="Enter width"
-              placeholderTextColor="#aaa"
+                        placeholder="0"
+                        placeholderTextColor={Colors.textSecondary}
               keyboardType="numeric"
             />
-            <Text style={styles.classificationLabel}>Breadth (cm)</Text>
+                    </View>
+                    <View style={[formStyles.inputContainer, { flex: 1 }]}>
+                      <Text style={formStyles.inputLabel}>Depth</Text>
             <TextInput
-              style={[styles.formInput, { marginBottom: 12 }]}
+                        style={formStyles.input}
               value={breadth}
               onChangeText={setBreadth}
-              placeholder="Enter breadth"
-              placeholderTextColor="#aaa"
+                        placeholder="0"
+                        placeholderTextColor={Colors.textSecondary}
               keyboardType="numeric"
             />
-            <Text style={styles.classificationLabel}>Notes (optional)</Text>
+                    </View>
+                  </View>
+                </AnimatedCard>
+
+                {/* Notes */}
+                <AnimatedCard variant="glass" style={{ padding: Spacing.lg }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.md }}>
+                    <View style={formStyles.iconContainer}>
+                      <Text style={{ fontSize: 20 }}>📝</Text>
+                    </View>
+                    <Text style={[Typography.h4, { color: Colors.textPrimary, fontSize: 18 }]}>Additional Notes</Text>
+                  </View>
+                  <View style={formStyles.inputContainer}>
             <TextInput
-              style={[styles.formInput, { marginBottom: 18 }]}
+                      style={[formStyles.input, { minHeight: 80, textAlignVertical: 'top' }]}
               value={notes}
               onChangeText={setNotes}
-              placeholder="Additional details (optional)"
-              placeholderTextColor="#aaa"
+                      placeholder="Any additional details about the item..."
+                      placeholderTextColor={Colors.textSecondary}
               multiline
-            />
-            <TouchableOpacity
-              style={styles.correctButton}
-              activeOpacity={0.85}
+                      numberOfLines={3}
+                    />
+                  </View>
+                </AnimatedCard>
+
+                {/* Action Buttons */}
+                <View style={{ gap: Spacing.md, marginTop: Spacing.lg }}>
+                  <AnimatedButton
+                    variant="primary"
+                    size="large"
               onPress={() =>
                 handleShowSuccess({
                   'Submission Type': 'Volume & Weight Estimation',
+                        'Item Type': result || 'Bulk Items',
                   'Volume': VOLUME_OPTIONS.find(opt => opt.value === volume)?.label || volume,
                   'Weight (kg)': weight,
                   'Height (cm)': height,
                   'Width (cm)': width,
-                  'Breadth (cm)': breadth,
+                        'Depth (cm)': breadth,
                   'Notes': notes,
                 })
               }
-            >
-              <Text style={styles.correctButtonText}>Submit</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.manualButton} activeOpacity={0.85} onPress={() => setShowVolumeForm(false)}>
-              <Text style={styles.manualButtonText}>Cancel</Text>
-            </TouchableOpacity>
+                    style={{ width: '100%' }}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                      <Ionicons name="checkmark-circle" size={20} color={Colors.gray[50]} />
+                      <Text style={[Typography.bodyBold, { color: Colors.gray[50], marginLeft: Spacing.sm }]}>
+                        Submit Details
+                      </Text>
           </View>
-        </ScrollView>
+                  </AnimatedButton>
+                  
+                  <AnimatedButton
+                    variant="outline"
+                    size="large"
+                    onPress={() => setShowVolumeForm(false)}
+                    style={{ width: '100%' }}
+                  >
+                    <Text style={[Typography.bodyBold, { color: Colors.primary }]}>Back</Text>
+                  </AnimatedButton>
+                </View>
+              </View>
+            </View>
+          </AnimatedScrollView>
+          
+          {/* Volume Dropdown Overlay */}
+          {showVolumeDropdown && (
+            <>
+              {/* Background overlay */}
+              <TouchableOpacity 
+                style={{ 
+                  position: 'absolute', 
+                  top: 0, 
+                  left: 0, 
+                  right: 0, 
+                  bottom: 0,
+                  backgroundColor: 'rgba(0,0,0,0.3)',
+                }}
+                activeOpacity={1}
+                onPress={() => {
+                  console.log('Background overlay pressed');
+                  setShowVolumeDropdown(false);
+                  volumeDropdownAnim.value = withTiming(0, { duration: 200 });
+                }}
+              />
+              
+              {/* Dropdown menu */}
+              <View
+                style={{
+                  position: 'absolute',
+                  left: Spacing.lg,
+                  right: Spacing.lg,
+                  top: 300, // Adjust this based on where your volume button is
+                  backgroundColor: Colors.darkSecondary,
+                  borderRadius: BorderRadius.md,
+                  borderWidth: 1,
+                  borderColor: Colors.darkTertiary,
+                  ...Shadows.xl,
+                  elevation: 20,
+                }}
+              >
+                {VOLUME_OPTIONS.map((opt, index) => (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={{
+                      paddingVertical: Spacing.lg,
+                      paddingHorizontal: Spacing.lg,
+                      backgroundColor: volume === opt.value ? Colors.primary + '20' : 'transparent',
+                      borderBottomWidth: index < VOLUME_OPTIONS.length - 1 ? 1 : 0,
+                      borderBottomColor: Colors.darkTertiary,
+                      minHeight: 48,
+                      justifyContent: 'center',
+                    }}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      console.log('Volume option selected:', opt.value);
+                      setVolume(opt.value);
+                      setShowVolumeDropdown(false);
+                      volumeDropdownAnim.value = withTiming(0, { duration: 200 });
+                    }}
+                  >
+                    <Text style={[Typography.body, { 
+                      color: volume === opt.value ? Colors.primary : Colors.textPrimary,
+                      fontWeight: volume === opt.value ? '600' : '400',
+                      fontSize: 16
+                    }]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
+        </View>
       )}
-      {/* ...existing classification UI, with button handlers: */}
+
+      {/* Classification Results */}
       {!showSuccess && !showManualForm && !showVolumeForm && photoUri && !isClassifying && (
-        <>
-          {/* ...classification UI... */}
-          <Animated.ScrollView contentContainerStyle={styles.resultScrollContent} showsVerticalScrollIndicator={false} style={{ opacity: fadeAnim }}>
-            <Text style={styles.verifyHeading}>Verify Classification</Text>
-            <View style={styles.sectionDivider} />
-            <View style={{ width: '100%', aspectRatio: 1, maxWidth: 500, marginBottom: 24, alignSelf: 'center', backgroundColor: '#222', borderRadius: 22, borderWidth: 2, borderColor: '#2196F3', overflow: 'hidden' }}>
-              <Image source={{ uri: photoUri }} style={{ width: '100%', height: '100%', resizeMode: 'contain', borderRadius: 22 }} />
+        <View style={{ flex: 1, backgroundColor: Colors.dark }}>
+          <AnimatedScrollView 
+            contentContainerStyle={{ paddingBottom: 40 }} 
+            showsVerticalScrollIndicator={false} 
+            style={[{ flex: 1 }, fadeAnimatedStyle]}
+          >
+            {/* Header */}
+            <LinearGradient
+              colors={[Colors.primaryDark, Colors.dark]}
+              style={{ paddingTop: 20, paddingBottom: 30 }}
+            >
+              <Text style={[Typography.h2, { color: Colors.gray[50], textAlign: 'center', marginBottom: 8 }]}>
+                AI Classification Result
+              </Text>
+              <Text style={[Typography.body, { color: Colors.textSecondary, textAlign: 'center' }]}>
+                Please verify the classification
+              </Text>
+            </LinearGradient>
+            
+            <View style={{ paddingHorizontal: Spacing.lg }}>
+              {/* Photo and Classification Card */}
+              <AnimatedCard
+                variant="glass"
+                style={{
+                  marginTop: -20,
+                  marginBottom: Spacing.lg,
+                  padding: Spacing.lg,
+                }}
+              >
+                {/* Photo */}
+                <View style={{ 
+                  aspectRatio: 16/9, 
+                  backgroundColor: Colors.darkSecondary, 
+                  borderRadius: BorderRadius.lg, 
+                  overflow: 'hidden',
+                  marginBottom: Spacing.lg
+                }}>
+                  <Image source={{ uri: photoUri }} style={{ width: '100%', height: '100%', resizeMode: 'cover' }} />
             </View>
-            <View style={styles.sectionDivider} />
-            <View style={styles.classificationBlock}>
-              <View style={styles.classificationIconRow}>
-                <Text style={styles.classificationMainIcon}>🛋️</Text>
+                
+                {/* Classification Info */}
+                <View style={{ gap: Spacing.md }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={{
+                      width: 56,
+                      height: 56,
+                      borderRadius: 28,
+                      backgroundColor: Colors.primary + '20',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: Spacing.md,
+                    }}>
+                      <Text style={{ fontSize: 28 }}>🛋️</Text>
+                    </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.classificationTitleLabel}>Waste Type</Text>
-                  <Text style={styles.classificationTitle}>{result || 'Bulk Items (Furniture, appliances)'}</Text>
+                      <Text style={[Typography.body, { color: Colors.textSecondary, fontSize: 14 }]}>Detected Type</Text>
+                      <Text style={[Typography.h3, { color: Colors.textPrimary, fontWeight: '700', fontSize: 22 }]}>
+                        {result || 'Bulk Items (Furniture, appliances)'}
+                      </Text>
                 </View>
               </View>
-              <View style={styles.classificationRow}>
-                <Text style={styles.classificationRowIcon}>📈</Text>
-                <View>
-                  <Text style={styles.classificationLabel}>Confidence</Text>
-                  <Text style={styles.confidenceText}><Text style={{ color: '#43e97b', fontWeight: 'bold' }}>94%</Text></Text>
+                  
+                  <View style={{ flexDirection: 'row', gap: Spacing.md }}>
+                    <View style={{
+                      flex: 1,
+                      backgroundColor: Colors.success + '10',
+                      padding: Spacing.md,
+                      borderRadius: BorderRadius.md,
+                      alignItems: 'center'
+                    }}>
+                      <Text style={[Typography.body, { color: Colors.success, fontSize: 12 }]}>Confidence</Text>
+                      <Text style={[Typography.h2, { color: Colors.success, fontWeight: '800', fontSize: 20 }]}>94%</Text>
+                </View>
+                    <View style={{
+                      flex: 2,
+                      backgroundColor: Colors.darkSecondary,
+                      padding: Spacing.md,
+                      borderRadius: BorderRadius.md,
+                    }}>
+                      <Text style={[Typography.body, { color: Colors.textSecondary, fontSize: 14 }]}>Description</Text>
+                      <Text style={[Typography.bodyBold, { color: Colors.textPrimary, fontSize: 16 }]}>Large furniture item</Text>
+              </View>
                 </View>
               </View>
-              <View style={styles.classificationRow}>
-                <Text style={styles.classificationRowIcon}>📝</Text>
-                <View style={styles.classificationDescContainer}>
-                  <Text style={styles.classificationLabel}>Description</Text>
-                  <Text style={styles.classificationDesc}>Large furniture item.</Text>
-                </View>
+              </AnimatedCard>
+              
+              {/* Action Buttons */}
+              <View style={{ gap: Spacing.md }}>
+                <AnimatedButton
+                  variant="primary"
+                  size="large"
+                  onPress={() => setShowVolumeForm(true)}
+                  style={{ width: '100%' }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                    <Ionicons name="checkmark-circle" size={20} color={Colors.gray[50]} />
+                    <Text style={[Typography.bodyBold, { color: Colors.gray[50], marginLeft: Spacing.sm }]}>
+                      Correct - Add Details
+                    </Text>
+            </View>
+                </AnimatedButton>
+                
+                <AnimatedButton
+                  variant="outline"
+                  size="large"
+                  onPress={() => setShowManualForm(true)}
+                  style={{ width: '100%' }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                    <Ionicons name="create-outline" size={20} color={Colors.primary} />
+                    <Text style={[Typography.bodyBold, { color: Colors.primary, marginLeft: Spacing.sm }]}>
+                      Manual Classification
+                    </Text>
+                  </View>
+                </AnimatedButton>
               </View>
             </View>
-            <View style={styles.sectionDivider} />
-            <TouchableOpacity style={styles.correctButton} activeOpacity={0.85} onPress={() => setShowVolumeForm(true)}>
-              <Text style={styles.correctButtonText}>✅ Correct Classification</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.manualButton} activeOpacity={0.85} onPress={() => setShowManualForm(true)}>
-              <Text style={styles.manualButtonText}>🛠️ Manually verify</Text>
-            </TouchableOpacity>
-          </Animated.ScrollView>
-        </>
+          </AnimatedScrollView>
+        </View>
       )}
+
       {/* Loading state */}
       {!showSuccess && isClassifying && (
         <View style={[styles.classifyingContainer, styles.classifyingShadow]}>
@@ -1463,6 +2552,8 @@ function CameraAIScreen({ navigation, user, onSignOut }) {
           <Text style={styles.classifyingText}>AI is identifying the waste type...</Text>
         </View>
       )}
+        </View>
+      </SafeAreaView>
     </View>
   );
 }
